@@ -1,0 +1,178 @@
+services:
+  app:
+    image: highload-app:local
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment: &app-environment
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      DB_CONNECTION: sqlite
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: analytics
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SESSION_DRIVER: redis
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis
+      PROMETHEUS_CACHE_STORE: redis
+      LOG_STACK: single,stdout_json
+    depends_on: &app-depends-on
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  worker:
+    image: highload-app:local
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["php", "artisan", "queue:work", "--tries=3", "--max-time=300", "--max-jobs=1000"]
+    environment: *app-environment
+    depends_on: *app-depends-on
+    healthcheck:
+      disable: true
+    volumes:
+      - .:/app
+
+  scheduler:
+    image: highload-app:local
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["php", "artisan", "events:flush-buffer", "--max-time=300"]
+    environment: *app-environment
+    depends_on: *app-depends-on
+    healthcheck:
+      disable: true
+    volumes:
+      - .:/app
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Локальная разработка: сразу открыть дашборд без логина.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/highload-analytics.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Создаёт data view в Kibana (аналог datasource в Grafana - без него Discover
+  # не знает, по какому индексу искать). Одноразовый идемпотентный вызов API,
+  # тот же принцип "provisioning as code", что и grafana/provisioning - просто
+  # у Kibana, в отличие от Grafana, нет штатного файлового provisioning для
+  # data views, поэтому руками через REST API вместо YAML-файла.
+  kibana-setup:
+    image: curlimages/curl:latest
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        curl -s -o /dev/null -w '%{http_code}' -X POST http://kibana:5601/api/data_views/data_view
+        -H 'kbn-xsrf: true' -H 'Content-Type: application/json'
+        -d '{"data_view":{"title":"laravel-logs-*","name":"Laravel logs","timeFieldName":"@timestamp"}}'
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.0
+    user: root
+    command: ["--strict.perms=false", "-e"]
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+volumes:
+  clickhouse_data:
+  es_data:

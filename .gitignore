@@ -1,0 +1,35 @@
+*.log
+.DS_Store
+.env
+.env.backup
+.env.production
+.phpactor.json
+.phpunit.result.cache
+/.codex
+/.cursor/
+/.idea
+/.nova
+/.phpunit.cache
+/storage/phpstan
+/.vscode
+/.zed
+/auth.json
+/node_modules
+/public/build
+/public/fonts-manifest.dev.json
+/public/hot
+/public/storage
+/storage/*.key
+/storage/pail
+/vendor
+_ide_helper.php
+Homestead.json
+Homestead.yaml
+Thumbs.db
+rr
+.rr.yaml
+
+# APP_KEY - реальный секрет, создаётся через `kubectl create secret` (см.
+# README "Запуск (Kubernetes)"), а не коммитится как YAML-манифест - на
+# случай, если кто-то локально заведёт файл по аналогии с остальными k8s/*.yaml.
+k8s/secret*.yaml

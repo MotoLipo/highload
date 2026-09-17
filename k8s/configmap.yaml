@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analytics-config
+  namespace: analytics
+data:
+  APP_ENV: production
+  APP_DEBUG: "false"
+  CLICKHOUSE_HOST: host.docker.internal # Для локального тестирования.
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DATABASE: analytics
+  REDIS_HOST: host.docker.internal # Для локального тестирования.
+  QUEUE_CONNECTION: redis
+  PROMETHEUS_CACHE_STORE: redis
+  CACHE_STORE: redis
+  SESSION_DRIVER: redis

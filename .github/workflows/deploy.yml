@@ -1,0 +1,86 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, redis, intl, pdo_sqlite
+          coverage: pcov
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run tests
+        run: php artisan test --coverage-text --only-summary-for-coverage-text
+
+      - name: Static analysis (PHPStan/Larastan)
+        run: composer run stan
+
+      - name: Composer audit (known vulnerabilities)
+        run: composer audit
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/motolipo/highload:latest
+            ghcr.io/motolipo/highload:${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to cluster
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBECONFIG" | base64 --decode > $HOME/.kube/config
+          kubectl apply -f k8s/namespace.yaml
+
+      - name: Create/update APP_KEY secret
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+          APP_KEY: ${{ secrets.APP_KEY }}
+        run: |
+          kubectl create secret generic analytics-secret \
+            --from-literal=APP_KEY="$APP_KEY" \
+            -n analytics \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy manifests
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: kubectl apply -f k8s/
